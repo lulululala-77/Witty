@@ -2,12 +2,14 @@
 
 # Witty
 
+**简体中文 · [English](README.en.md)**
+
 ### 记得聊过什么，也帮你想好怎么回。
 
 Windows 微信 AI 回复助手 · 本地记忆检索 · 三条候选 · 一键填入
 
-[![Stars](https://img.shields.io/github/stars/lulululala-77/Witty---AI-Reply-Assistant-for-WeChat?style=flat-square)](https://github.com/lulululala-77/Witty---AI-Reply-Assistant-for-WeChat/stargazers)
-[![Forks](https://img.shields.io/github/forks/lulululala-77/Witty---AI-Reply-Assistant-for-WeChat?style=flat-square)](https://github.com/lulululala-77/Witty---AI-Reply-Assistant-for-WeChat/forks)
+[![Stars](https://img.shields.io/github/stars/lulululala-77/Witty?style=flat-square)](https://github.com/lulululala-77/Witty/stargazers)
+[![Forks](https://img.shields.io/github/forks/lulululala-77/Witty?style=flat-square)](https://github.com/lulululala-77/Witty/forks)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D4?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-内测中-F97316?style=flat-square)
@@ -102,7 +104,7 @@ OCR、会话识别和填入行为受窗口状态、系统缩放及聊天软件�
 
 ## 💬 反馈与贡献
 
-欢迎通过 [Issues](https://github.com/lulululala-77/Witty---AI-Reply-Assistant-for-WeChat/issues) 描述问题或建议。请提供系统版本、复现步骤、预期与实际表现。截图请遮盖私人内容，不要上传密钥或真实聊天数据库。
+欢迎通过 [Issues](https://github.com/lulululala-77/Witty/issues) 描述问题或建议。请提供系统版本、复现步骤、预期与实际表现。截图请遮盖私人内容，不要上传密钥或真实聊天数据库。
 
 <a id="credits"></a>
 ## 🤝 项目来源与致谢
