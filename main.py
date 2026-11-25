@@ -13,6 +13,8 @@ import queue
 import threading
 import traceback
 import time
+import uuid
+from app import analytics
 from datetime import datetime, timedelta
 from collections import deque
 
@@ -160,6 +162,9 @@ def on_toggle_capture(on):
 
 def analyze_bg(msgs, title, revision, reply_to=None):
     """后台线程只跑网络调用，结果丢队列；UI 只在主线程的 tick 里动（Qt 不能跨线程碰）。"""
+    telemetry_id = str(uuid.uuid4())
+    started = time.monotonic()
+    analytics.track('generation_started', suggestion_id=telemetry_id)
     try:
         latest = msgs[-1][1] if msgs else ""
         query_speaker = None
@@ -188,9 +193,17 @@ def analyze_bg(msgs, title, revision, reply_to=None):
                                    jev_model=settings.jev_model() or None,
                                    judge_memory=judge_context,
                                    draft_memory=draft_context)
+        if not result.get('candidates'):
+            raise ValueError('empty candidates')
+        result['_analytics_id'] = telemetry_id
+        result['_analytics_started'] = started
         log_trace(title, latest, judge_context, draft_context, result)
+        analytics.track('generation_finished', suggestion_id=telemetry_id, status='success',
+                        candidate_count=len(result['candidates']), duration_ms=round((time.monotonic()-started)*1000))
         results.put(("ok", result, title, revision))
     except Exception as e:
+        analytics.track('generation_finished', suggestion_id=telemetry_id, status='failure',
+                        duration_ms=round((time.monotonic()-started)*1000))
         results.put(("err", f"{T('分析失败: ')}{e}", title, revision))
 
 
@@ -391,10 +404,14 @@ def tick():
             kind, r, title, revision = results.get()
             state["busy"] = False
             if state["rerun"]:  # 分析期间又来了新消息，接着跑最新的
+                if kind == 'ok':
+                    analytics.track('result_discarded', suggestion_id=r.get('_analytics_id', ''), reason='new_message_pending')
                 (t, msgs), state["rerun"] = state["rerun"], None
                 start_analyze(t, msgs)
                 continue
             if revision != chat_of(title)["rev"]:  # 这个会话后来又说话了，这份结果过期了
+                if kind == 'ok':
+                    analytics.track('result_discarded', suggestion_id=r.get('_analytics_id', ''), reason='stale_revision')
                 ov.set_busy(False)
                 continue
             if kind == "ok":
@@ -414,6 +431,7 @@ def tick():
 
 if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本文件，没这行就无限套娃开进程
     multiprocessing.freeze_support()  # 打包成 exe 后 spawn 出来的子进程会重跑一遍 exe，没这行就无限弹界面
+    analytics.initialize()
     # Qt 6 already sets Per-Monitor-V2 DPI awareness. Calling the legacy
     # SetProcessDPIAware here conflicts with Qt and produces a harmless but
     # noisy "SetProcessDpiAwarenessContext failed" warning on Windows.
@@ -446,5 +464,6 @@ if __name__ == "__main__":  # Windows 的 spawn 会让子进程重新执行本�
     try:
         ov.run()
     finally:
+        analytics.shutdown()
         if child is not None:
             child.terminate()

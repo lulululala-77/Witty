@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """用合成数据预览 Qt 界面；不采集、不联网、不操作真实微信。
 
-    python tools/preview_ui.py --state ready
-    python tools/preview_ui.py --state ready --screenshot docs/ui_home.png
+    python -m tools.preview_ui --state ready
+    python -m tools.preview_ui --state ready --width 460 --height 860 --screenshot docs/ui_home.png
+    python -m tools.preview_ui --state settings --lang ko --scroll-bottom
 
 演示设置只保存在内存，不读取真实密钥，也不修改环境变量或 config.json。
 「获取模型」按钮也走得通：两个列模型的接口都被换成了本地假列表，全程不联网。
@@ -102,11 +103,26 @@ _RESULT = {
 
 
 def main() -> int:
+    # 读取支持的语言时也隔离配置；显式 --lang 会覆盖启动环境的语言。
+    with patch.object(settings, "language", lambda: "zh"):
+        from app import i18n
+
+    def positive_pixels(value):
+        pixels = int(value)
+        if pixels <= 0:
+            raise argparse.ArgumentTypeError("窗口尺寸必须大于 0")
+        return pixels
+
     parser = argparse.ArgumentParser(
         description="用合成聊天预览 Qt UI；绝不采集、联网或填入真实微信。"
     )
     parser.add_argument("--state", choices=_STATES, default="ready", help="预览界面状态")
     parser.add_argument("--screenshot", metavar="PATH", help="将演示界面保存为 PNG 后退出（合成数据，不含微信内容）")
+    parser.add_argument("--width", type=positive_pixels, help="窗口宽度，自动遵循正常窗口最小/最大值")
+    parser.add_argument("--height", type=positive_pixels, help="窗口高度，自动遵循正常窗口最小/最大值")
+    parser.add_argument("--lang", choices=[code for _, code in i18n.LANGUAGES], default="zh",
+                        help="预览界面语言，不读取或修改真实语言设置")
+    parser.add_argument("--scroll-bottom", action="store_true", help="将当前页面滚动到底部后预览或截图")
     args = parser.parse_args()
     target = Path(args.screenshot).expanduser() if args.screenshot else None
 
@@ -118,20 +134,21 @@ def main() -> int:
                      "draft_provider": "deepseek", "draft_model": "deepseek-flash",
                      "draft_base_url": "", "reply_target": True,
                      "style": "话少，基本不用标点，急了才发感叹号", "thinking": False,
-                     "check_update": True, "debug_view": args.state == "debug"}
+                     "check_update": True, "debug_view": args.state == "debug", "lang": args.lang}
 
     def save_demo_settings(relationship_text=None, context_n=None, *, jev_provider_text=None,
                            jev_key_text=None, jev_model_text=None, draft_provider_text=None,
                            llm_key_text=None, draft_model_text=None, draft_base_url_text=None,
                            reply_target_on=None, style_text=None, thinking_on=None,
-                           check_update_on=None, debug_view_on=None):
+                           check_update_on=None, debug_view_on=None, lang_text=None):
         if relationship_text:
             demo_settings["relationship"] = relationship_text
         if context_n is not None:
             demo_settings["context"] = context_n
         for name, value in (("jev_provider", jev_provider_text), ("jev_model", jev_model_text),
                             ("draft_provider", draft_provider_text), ("draft_model", draft_model_text),
-                            ("draft_base_url", draft_base_url_text), ("style", style_text)):
+                            ("draft_base_url", draft_base_url_text), ("style", style_text),
+                            ("lang", lang_text)):
             if value is not None:
                 demo_settings[name] = value
         for name, key in (("jev_key", jev_key_text), ("llm_key", llm_key_text)):
@@ -147,7 +164,7 @@ def main() -> int:
         return (["typesafe/jev-1.13"] if provider == "openrouter"
                 else ["jev-1.13.0", "jev-latest", "jev-preview"])
 
-    def fake_llm_models(protocol, base_url, api_key, timeout=10):
+    def fake_llm_models(protocol, base_url, api_key, timeout=10, headers=None):
         return {"anthropic": ["claude-demo-4", "claude-demo-4-mini"],
                 "gemini": ["gemini-demo-pro", "gemini-demo-flash"]}.get(
             protocol, ["deepseek-flash", "deepseek-reasoner", "demo-model-a", "demo-model-b"])
@@ -173,9 +190,11 @@ def main() -> int:
         thinking=lambda: demo_settings["thinking"],
         check_update=lambda: demo_settings["check_update"],
         debug_view=lambda: demo_settings["debug_view"],
+        language=lambda: demo_settings["lang"],
         save=save_demo_settings,
-    ):
+    ), patch("app.analytics._client", None):
         from PySide6.QtCore import QTimer
+        i18n.reload(args.lang)
         from app.overlay import Overlay
 
         def simulate_fill(text):
@@ -186,7 +205,7 @@ def main() -> int:
 
         # 只有当前会话有结果，切到另一个会话就是空态——跟真实情况一致
         ov = Overlay(on_fill=simulate_fill, result_of=lambda t: _RESULT if t == _CHAT else None)
-        ov.win.setWindowTitle("JevChat-Windows · 界面演示（合成数据）")
+        ov.win.setWindowTitle("witty · 界面演示（合成数据）")
         shot = ov.win  # 截图截哪个窗口；调试预览截调试窗
 
         if args.state == "debug":
@@ -220,6 +239,17 @@ def main() -> int:
                 ov.open_settings()
             elif args.state == "paused":
                 ov.set_capture(False)
+
+        if args.width is not None or args.height is not None:
+            # QWidget.resize 会按已有 minimum/maximumSize 限制，不改变生产布局边界。
+            shot.resize(args.width or shot.width(), args.height or shot.height())
+        if args.scroll_bottom:
+            def scroll_to_bottom():
+                bar = ov.pages.currentWidget().verticalScrollBar()
+                bar.setValue(bar.maximum())
+
+            # 等 resize 和页面布局完成，确保能滚动到最终的底部。
+            QTimer.singleShot(250, scroll_to_bottom)
 
         exit_code = 0
         if target is not None:

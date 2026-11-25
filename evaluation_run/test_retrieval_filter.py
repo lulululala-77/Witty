@@ -33,6 +33,17 @@ class FilterTests(unittest.TestCase):
  def test_service_error_is_not_semantic_empty(self):
   with patch('core.llm.chat',side_effect=RuntimeError('offline')):
    self.assertEqual(rf.filter_candidates('消息',self.c)['status'],'error')
+ def test_threshold_gates_model_call(self):
+  with tempfile.TemporaryDirectory() as d,patch.object(rag,'DB_PATH',Path(d)/'test.sqlite3'):
+   with closing(rag._connect()) as c,c:
+    c.execute('INSERT INTO memories(dimension,contact,category,content,importance,embedding) VALUES(?,?,?,?,?,?)',('other_person','甲','fact','甲喜欢苹果',3,np.array([1.,0.],dtype=np.float32).tobytes()))
+   for similarity in [.4249,.425,.4251]:
+    with self.subTest(similarity=similarity),patch.object(rag,'_encode',return_value=np.array([[1.,0.]])),patch('numpy.dot',return_value=similarity),patch('core.llm.chat',return_value='{"keep_ids":[1]}') as model:
+     text=rag.retrieve('甲喜欢苹果',contact='甲')
+     self.assertEqual(bool(text),similarity>=.425)
+     self.assertEqual(model.call_count,int(similarity>=.425))
+   with patch.object(rag,'_encode',side_effect=RuntimeError('offline')),patch('core.llm.chat') as model:
+    self.assertEqual(rag.retrieve('甲喜欢苹果',contact='甲'),'');model.assert_not_called()
  def test_production_retrieve_filters_scope_and_keeps_original_text(self):
   with tempfile.TemporaryDirectory() as d,patch.object(rag,'DB_PATH',Path(d)/'test.sqlite3'),patch.object(rag,'_encode',return_value=np.array([[1.,0.]],dtype=np.float32)):
    with closing(rag._connect()) as c,c:

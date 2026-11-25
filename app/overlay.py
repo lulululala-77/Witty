@@ -1,34 +1,36 @@
 # -*- coding: utf-8 -*-
 """浅色置顶回复助手：回复建议和独立设置页。发送始终由用户确认。"""
 import os
-import sys
 import threading
+import time
+import uuid
+from app import analytics
 from datetime import datetime
 from math import isfinite
 from types import SimpleNamespace
 
 from PySide6.QtCore import QObject, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QPixmap
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy,
+    QApplication, QFrame, QHBoxLayout, QPushButton, QSizeGrip, QSizePolicy, QSpinBox,
     QStackedWidget, QVBoxLayout, QWidget, QDialog, QDialogButtonBox, QMessageBox,
 )
 from qfluentwidgets import (
     BodyLabel, CardWidget, CheckBox, ComboBox, EditableComboBox, FluentIcon as FIF,
     HyperlinkButton, IndeterminateProgressBar, LineEdit, PasswordLineEdit, PlainTextEdit,
-    PrimaryPushButton, PushButton, ScrollArea, SpinBox, SwitchButton, Theme, TransparentToolButton,
-    setCustomStyleSheet, setFont, setTheme, setThemeColor,
+    PrimaryPushButton, PushButton, ScrollArea, SwitchButton, Theme, TransparentToolButton,
+    setCustomStyleSheet, setFont, setFontFamilies, setTheme, setThemeColor,
 )
 
 from app import i18n, settings
-from app.version import VERSION
+from app.ui_theme import ACCENT, MUTED, TEXT, NAV_STYLE, paint_surface, paint_window, style_control
 from core import jev_client, llm, providers
 from core.questions import CHOICE_LABELS
 from app.i18n import LANGUAGES, T, bind
 
 _LOG_LINES = 300
-_MUTED = "#68776f"
-_GREEN = "#18794e"
+_MUTED = MUTED
+_ACCENT = ACCENT
 _RELATIONSHIPS = [
     ("恋人", "romantic partners"), ("朋友", "friends"), ("同事", "colleagues"),
     ("家人", "family"), ("自定义", None),
@@ -37,41 +39,6 @@ _RELATIONSHIPS = [
 
 def _choice(answers, name):
     return T(CHOICE_LABELS[name].get((answers.get(name) or {}).get("choice"), "暂未判断"))
-
-
-def _mp_banner_path() -> str:
-    """打包后在 _MEIPASS/docs，源码跑在仓库 docs/。"""
-    root = getattr(sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(root, "docs", "wechat-mp.png")
-
-
-class _MpBanner(QLabel):
-    """公众号长条横幅，宽度跟着设置页走，高度按原图比例。"""
-
-    def __init__(self, path, parent=None):
-        super().__init__(parent)
-        self._src = QPixmap(path)
-        self._shown = 0
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-    def hasHeightForWidth(self):
-        return True
-
-    def heightForWidth(self, w):
-        if self._src.isNull() or w <= 0 or self._src.width() <= 0:
-            return 0
-        return max(1, round(w * self._src.height() / self._src.width()))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        w = self.width()
-        if w <= 0 or w == self._shown or self._src.isNull():
-            return
-        h = self.heightForWidth(w)
-        self._shown = w
-        self.setPixmap(self._src.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        if self.height() != h:
-            self.setFixedHeight(h)
 
 
 class _FitCombo(ComboBox):
@@ -115,7 +82,7 @@ class _FitCombo(ComboBox):
         return self.fontMetrics().elidedText(text, Qt.ElideRight, max(24, avail))
 
 
-def _label(text="", size=14, color=None, bold=False, parent=None):
+def _label(text="", size=14, color=TEXT, bold=False, parent=None):
     label = BodyLabel(text, parent)
     label.setTextFormat(Qt.PlainText)
     label.setWordWrap(True)
@@ -138,6 +105,7 @@ def _tool(icon, title, callback, parent=None):
     bind(button, title, "setToolTip")
     bind(button, title, "setAccessibleName")
     button.clicked.connect(callback)
+    style_control(button)
     return button
 
 
@@ -145,17 +113,20 @@ class _Surface(CardWidget):
     def __init__(self, parent=None, accent=False):
         self.accent = accent
         super().__init__(parent)
-        self.setBorderRadius(12)
+        self.setBorderRadius(18)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
     def _normalBackgroundColor(self):
-        return QColor("#edf7f0" if self.accent else "#ffffff")
+        return QColor("#edf2fa" if self.accent else "#ffffff")
 
     def _hoverBackgroundColor(self):
         return self._normalBackgroundColor()
 
     def _pressedBackgroundColor(self):
         return self._normalBackgroundColor()
+
+    def paintEvent(self, event):
+        paint_surface(self, self.accent)
 
 
 class _Fetched(QObject):
@@ -195,6 +166,9 @@ class _MainWindow(QWidget):
         super().resizeEvent(event)
         self._relayout(event.size().width(), event.size().height())
 
+    def paintEvent(self, event):
+        paint_window(self)
+
 
 class _ReplyCard(_Surface):
     def __init__(self, owner, index, recommended=False, number=1, score=None):
@@ -205,7 +179,7 @@ class _ReplyCard(_Surface):
         top = QHBoxLayout()
         title = lambda: T("推荐回复") if recommended else f"{T('备选')} {number}"
         top.addWidget(_tlabel(lambda: title() + (f" · {round(score * 100)}%" if score is not None else ""),
-                             12, _GREEN if recommended else _MUTED, True))
+                             12, _ACCENT if recommended else _MUTED, True))
         self.copyButton = _tool(FIF.COPY, "复制这条回复", lambda: owner._copy(index), self)
         self.copyButton.setFixedSize(24, 24)
         top.addWidget(self.copyButton)
@@ -213,13 +187,11 @@ class _ReplyCard(_Surface):
         self.text = _label(owner.cands[index], 15)
         self.text.setTextInteractionFlags(Qt.TextSelectableByMouse)
         box.addWidget(self.text)
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
         self.fillButton = bind((PrimaryPushButton if recommended else PushButton)("", self), "填入")
         bind(self.fillButton, lambda: T("填入 {reply}").format(reply=title()), "setAccessibleName")
         self.fillButton.clicked.connect(lambda: owner._fill(index))
-        bottom.addWidget(self.fillButton)
-        box.addLayout(bottom)
+        style_control(self.fillButton)
+        top.addWidget(self.fillButton)
         self.set_compact(owner._compact)
 
     def set_available(self, enabled):
@@ -227,8 +199,8 @@ class _ReplyCard(_Surface):
         self.copyButton.setEnabled(enabled)
 
     def set_compact(self, compact):
-        self.box.setContentsMargins(12, 8, 12, 8) if compact else self.box.setContentsMargins(16, 12, 16, 12)
-        self.fillButton.setMinimumWidth(80 if compact else 100)
+        self.box.setContentsMargins(14, 12, 14, 12) if compact else self.box.setContentsMargins(18, 14, 18, 14)
+        self.fillButton.setMinimumWidth(64 if compact else 72)
 
 
 class Overlay:
@@ -239,8 +211,12 @@ class Overlay:
         on_target_change(会话名, 人名) → 用户在群里挑了回复对象。
         on_toggle_debug(开不开) → 开关调试视图那个独立窗口。"""
         self.app = QApplication.instance() or QApplication([])
+        setFontFamilies(["Microsoft YaHei UI", "Segoe UI", "Microsoft YaHei", "PingFang SC"], save=False)
+        app_font = QFont("Microsoft YaHei UI")
+        app_font.setPixelSize(13)
+        self.app.setFont(app_font)
         setTheme(Theme.LIGHT)
-        setThemeColor(_GREEN, save=False)
+        setThemeColor(_ACCENT, save=False)
         self.on_fill = on_fill
         self.on_save_memory = on_save_memory
         self.on_toggle_rag = on_toggle_rag
@@ -250,6 +226,10 @@ class Overlay:
         self.on_language_changed = on_language_changed
         self.result_of = result_of
         self.cands = []
+        self._analytics_result = None
+        self._analytics_exposed = set()
+        self._analytics_first_seen = {}
+        self._analytics_order = []
         self.cards = []
         self._busy = False
         self._current = False
@@ -265,25 +245,24 @@ class Overlay:
         self._shown = ""  # 界面上正在看的会话（浏览时和上面不一样）
         self.win = _MainWindow(self._relayout)
         self.win.setObjectName("assistantWindow")
-        self.win.setWindowTitle("JevChat-Windows")
+        self.win.setWindowTitle("witty")
         self.win.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.win.setStyleSheet(
-            "QWidget#assistantWindow { background: #f5f7f6; border: 1px solid #dce3de; border-radius: 14px; }"
-        )
+        self.win.setAttribute(Qt.WA_TranslucentBackground)
+        self.win.setStyleSheet("QToolTip { color: #343740; background: #fafbfc; border: 1px solid #dde1e8; padding: 5px; }")
         self.win.setMinimumWidth(320)
         self.win.setMaximumWidth(640)
         outer = QVBoxLayout(self.win)
-        outer.setContentsMargins(1, 1, 1, 1)
+        outer.setContentsMargins(9, 9, 9, 9)
         outer.setSpacing(0)
         header = _TitleBar(self.win)
         title = QHBoxLayout(header)
-        title.setContentsMargins(18, 12, 10, 10)
+        title.setContentsMargins(22, 15, 14, 13)
         title.setSpacing(8)
-        name = _label("Jev", 20, "#233c2f", True)
-        name.setFixedWidth(40)
+        name = _label("witty", 20, TEXT, True)
+        name.setFixedWidth(name.fontMetrics().horizontalAdvance("witty") + 2)
         name.setAttribute(Qt.WA_TransparentForMouseEvents)
         title.addWidget(name)
-        self.subtitle = _label("JevChat-Windows", 12, _MUTED)
+        self.subtitle = _label("CHAT", 10, _MUTED)
         self.subtitle.setAttribute(Qt.WA_TransparentForMouseEvents)
         title.addWidget(self.subtitle, 1)
         self.captureSwitch = SwitchButton(header)
@@ -299,11 +278,31 @@ class Overlay:
         title.addWidget(_tool(FIF.REMOVE, "最小化", self.win.showMinimized, header))
         title.addWidget(_tool(FIF.CLOSE, "关闭助手", self.win.close, header))
         outer.addWidget(header)
+        navigation = QFrame(self.win)
+        navigation.setObjectName("pageNavigation")
+        navigation.setStyleSheet(NAV_STYLE)
+        nav_row = QHBoxLayout(navigation)
+        nav_row.setContentsMargins(4, 4, 4, 4)
+        nav_row.setSpacing(4)
+        self.homeTab = bind(QPushButton(), "回复建议")
+        self.settingsTab = bind(QPushButton(), "设置")
+        for button in (self.homeTab, self.settingsTab):
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setCursor(Qt.PointingHandCursor)
+            nav_row.addWidget(button, 1)
+        self.homeTab.setChecked(True)
+        self.homeTab.clicked.connect(self._back_home)
+        self.settingsTab.clicked.connect(self.open_settings)
+        nav_inset = QHBoxLayout()
+        nav_inset.setContentsMargins(20, 0, 20, 12)
+        nav_inset.addWidget(navigation)
+        outer.addLayout(nav_inset)
         self.updateBar = QWidget(self.win)
         update_row = QHBoxLayout(self.updateBar)
         update_row.setContentsMargins(18, 4, 8, 4)
         update_row.setSpacing(8)
-        self.updateLabel = _label("", 12, _GREEN, True)
+        self.updateLabel = _label("", 12, _ACCENT, True)
         update_row.addWidget(self.updateLabel, 1)
         self.updateLink = bind(HyperlinkButton("", "", self.updateBar), "去下载")
         self.updateLink.setFixedHeight(24)
@@ -321,16 +320,22 @@ class Overlay:
         outer.addWidget(self.pages, 1)
         self._build_home()
         self._build_settings()
+        for widget in self.win.findChildren(QWidget):
+            style_control(widget)
+        self._analytics_timer = QTimer(self.win)
+        self._analytics_timer.timeout.connect(self._check_analytics_exposure)
+        self._analytics_timer.start(500)
+        self.app.aboutToQuit.connect(lambda: self._analytics_leave('app_exit'))
         footer = QHBoxLayout()
         footer.setContentsMargins(20, 9, 8, 8)
-        footer.addWidget(_tlabel(lambda: f"{T('仅填入输入框 · 发送由你确认')} · v{VERSION}", 11, _MUTED), 1)
+        footer.addStretch(1)
         grip = QSizeGrip(self.win)
         grip.setFixedSize(16, 16)
         footer.addWidget(grip, 0, Qt.AlignBottom)
         outer.addLayout(footer)
         screen = self.app.primaryScreen().availableGeometry()
         self.win.setMinimumHeight(min(360, screen.height() - 32))
-        self.win.resize(min(440, screen.width() - 32), min(820, screen.height() - 48))
+        self.win.resize(min(460, screen.width() - 32), min(860, screen.height() - 48))
         self.win.move(screen.right() - self.win.width() - 20, screen.top() + 24)
         self._relayout(self.win.width(), self.win.height())  # resizeEvent 补不到构造时这一次
         self.set_status("等待新消息" if settings.has_key() else "需要配置模型",
@@ -349,7 +354,7 @@ class Overlay:
         content.setStyleSheet("QWidget#pageContent { background: transparent; }")
         layout = QVBoxLayout(content)
         layout.setContentsMargins(20, 8, 20, 12)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
         scroll.setWidget(content)
         self.pages.addWidget(scroll)
         self._pageLayouts.append(layout)
@@ -381,7 +386,7 @@ class Overlay:
     def _build_home(self):
         self.home, body = self._scroll_page()
         heading = QHBoxLayout()
-        heading.addWidget(_tlabel("回复建议", 23, "#24382d", True), 1)
+        heading.addWidget(_tlabel("回复建议", 24, TEXT, True), 1)
         self.updated = _label("", 11, _MUTED)
         self.updated.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         heading.addWidget(self.updated)
@@ -423,6 +428,7 @@ class Overlay:
         self.status = _label("", 12, _MUTED)
         body.addWidget(self.status)
         self.contextStats = _label("", 11, _MUTED)
+        self.contextStats.hide()
         self.contextStats.setTextInteractionFlags(Qt.TextSelectableByMouse)
         bind(self.contextStats, "本轮实际发送给模型的消息数 / 参考上下文设置上限", "setToolTip")
         body.addWidget(self.contextStats)
@@ -430,12 +436,12 @@ class Overlay:
         self.progress.setFixedHeight(3)
         self.progress.hide()
         body.addWidget(self.progress)
-        self.context = QWidget()
+        self.context = _Surface()
         context_box = QVBoxLayout(self.context)
-        context_box.setContentsMargins(0, 0, 0, 0)
-        context_box.setSpacing(5)
+        context_box.setContentsMargins(16, 13, 16, 13)
+        context_box.setSpacing(8)
         context_box.addWidget(_tlabel("对方最近说", 11, _MUTED))
-        self.latest = _label("", 14, "#42574a")
+        self.latest = _label("", 14, "#525863")
         self.latest.setTextInteractionFlags(Qt.TextSelectableByMouse)
         context_box.addWidget(self.latest)
         self.context.hide()
@@ -443,8 +449,8 @@ class Overlay:
 
         self.insight = _Surface()
         insight_box = QVBoxLayout(self.insight)
-        insight_box.setContentsMargins(14, 12, 14, 12)
-        insight_box.setSpacing(7)
+        insight_box.setContentsMargins(16, 14, 16, 14)
+        insight_box.setSpacing(9)
         row = QHBoxLayout()
         self.insightTitle = _tlabel("对话参考", 12, _MUTED)
         row.addWidget(self.insightTitle, 1)
@@ -452,7 +458,7 @@ class Overlay:
         self.tension.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         row.addWidget(self.tension)
         insight_box.addLayout(row)
-        self.summary = _label("", 14, "#304c3c", True)
+        self.summary = _label("", 14, TEXT, True)
         insight_box.addWidget(self.summary)
         self.intent = _label("", 12, _MUTED)
         insight_box.addWidget(self.intent)
@@ -464,10 +470,10 @@ class Overlay:
         empty_box = QVBoxLayout(self.empty)
         empty_box.setContentsMargins(24, 36, 24, 36)
         empty_box.setSpacing(14)
-        symbol = _label("…", 30, _GREEN, True)
+        symbol = _label("…", 30, _ACCENT, True)
         symbol.setAlignment(Qt.AlignCenter)
         empty_box.addWidget(symbol)
-        self.emptyTitle = _tlabel("等待对方的新消息", 17, "#304c3c", True)
+        self.emptyTitle = _tlabel("等待对方的新消息", 17, TEXT, True)
         self.emptyTitle.setAlignment(Qt.AlignCenter)
         empty_box.addWidget(self.emptyTitle)
         self.emptyHint = _tlabel("保持聊天窗口打开。\n收到新消息后，回复建议会出现在这里。", 13, _MUTED)
@@ -482,7 +488,7 @@ class Overlay:
             bind(self.emptyHint, "配置模型和关系背景，\n让建议更贴近你们的对话。", "setText")
         body.addWidget(self.empty)
         self.replyBox = QVBoxLayout()
-        self.replyBox.setSpacing(10)
+        self.replyBox.setSpacing(12)
         body.addLayout(self.replyBox)
         self.referenceNote = _tlabel("AI 建议仅供参考，按你的语气调整后再发送。", 11, _MUTED)
         self.referenceNote.hide()
@@ -499,10 +505,13 @@ class Overlay:
         self.ragSwitch = SwitchButton("根据历史推荐")
         self.ragSwitch.setChecked(True)
         self.ragSwitch.checkedChanged.connect(lambda checked: self.on_toggle_rag(bool(checked)) if self.on_toggle_rag else None)
-        body.addWidget(self.ragSwitch)
-        self.ragTraceButton = bind(PushButton("查看本次 RAG 检索"), "查看最近一次命中的 RAG 内容")
-        self.ragTraceButton.clicked.connect(lambda: self.show_rag_trace(getattr(self, "_last_rag_trace", "")))
-        body.addWidget(self.ragTraceButton)
+        memory_row = QHBoxLayout()
+        memory_row.addWidget(self.ragSwitch)
+        memory_row.addStretch(1)
+        self.ragTraceButton = _tool(FIF.SEARCH, "查看最近一次命中的 RAG 内容",
+                                    lambda: self.show_rag_trace(getattr(self, "_last_rag_trace", "")))
+        memory_row.addWidget(self.ragTraceButton)
+        body.addLayout(memory_row)
         self.feed = PlainTextEdit()
         self.feed.setReadOnly(True)
         bind(self.feed, "识别到的聊天内容会显示在这里", "setPlaceholderText")
@@ -516,18 +525,14 @@ class Overlay:
     def _build_settings(self):
         self.settingsPage, body = self._scroll_page()
         heading = QHBoxLayout()
-        heading.addWidget(_tool(FIF.RETURN, "返回回复建议", self._back_home))
-        heading.addWidget(_tlabel("设置", 23, "#24382d", True), 1)
+        heading.addWidget(_tlabel("设置", 24, TEXT, True), 1)
         body.addLayout(heading)
-        banner = _mp_banner_path()
-        if os.path.exists(banner):
-            body.addWidget(_MpBanner(banner))
 
         language = _Surface()
         box = QVBoxLayout(language)
         box.setContentsMargins(16, 16, 16, 18)
         box.setSpacing(12)
-        language_label = _tlabel("界面语言 / Language", 16, "#304c3c", True)
+        language_label = _tlabel("界面语言 / Language", 16, TEXT, True)
         box.addWidget(language_label)
         self.languageBox = ComboBox()
         self.languageBox.setMinimumWidth(0)
@@ -547,7 +552,7 @@ class Overlay:
         box = QVBoxLayout(preference)
         box.setContentsMargins(16, 16, 16, 18)
         box.setSpacing(12)
-        box.addWidget(_tlabel("回复偏好", 16, "#304c3c", True))
+        box.addWidget(_tlabel("回复偏好", 16, TEXT, True))
         relation_label = _tlabel("你们的关系", 13)
         box.addWidget(relation_label)
         self.relationshipBox = ComboBox()
@@ -574,7 +579,8 @@ class Overlay:
         box.addWidget(self._hint("候选本来就照着你最近发的消息模仿；这里可以再补一句你自己的口吻。"))
         context_label = _tlabel("参考上下文", 13)
         box.addWidget(context_label)
-        self.contextBox = SpinBox()
+        self.contextBox = QSpinBox()
+        self.contextBox.setFixedHeight(34)
         self.contextBox.setRange(3, 30)
         bind(self.contextBox, "参考的最近消息条数", "setAccessibleName")
         context_label.setBuddy(self.contextBox)
@@ -623,7 +629,7 @@ class Overlay:
         box = QVBoxLayout(models)
         box.setContentsMargins(16, 16, 16, 18)
         box.setSpacing(12)
-        box.addWidget(_tlabel("模型", 16, "#304c3c", True))
+        box.addWidget(_tlabel("模型", 16, TEXT, True))
         self._fetched = _Fetched()
         self._fetched.done.connect(self._models_fetched)
         self.jev = self._model_group(box, "判断 · Jev", "jev", providers.JEV_PROVIDERS)
@@ -648,7 +654,10 @@ class Overlay:
             .format(providers=" / ".join(providers.THINKING))
         ))
         body.addWidget(models)
-        self.settingsFeedback = _label("", 13, _GREEN)
+        analyticsButton = PushButton('内测使用统计 · PostHog')
+        analyticsButton.clicked.connect(lambda: analytics.open_settings(self.win))
+        body.addWidget(analyticsButton)
+        self.settingsFeedback = _label("", 13, _ACCENT)
         self.settingsFeedback.hide()
         body.addWidget(self.settingsFeedback)
         actions = QHBoxLayout()
@@ -677,8 +686,8 @@ class Overlay:
                                 stored_key=lambda k=kind: (settings.jev_key() if k == "jev"
                                                            else settings.llm_key()))
         heading = QHBoxLayout()
-        heading.addWidget(_tlabel(title, 14, "#304c3c", True), 1)
-        group.keyState = _label("", 12, _GREEN)
+        heading.addWidget(_tlabel(title, 14, TEXT, True), 1)
+        group.keyState = _label("", 12, _ACCENT)
         group.keyState.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         heading.addWidget(group.keyState)
         box.addLayout(heading)
@@ -723,6 +732,7 @@ class Overlay:
         row.addWidget(group.fetchButton)
         box.addLayout(row)
         group.status = _label("", 12, _MUTED)
+        group.status.hide()
         box.addWidget(group.status)
         group.providerBox.currentIndexChanged.connect(lambda _: self._provider_changed(group))
         return group
@@ -739,6 +749,7 @@ class Overlay:
         group.modelBox.clear()
         group.modelBox.setText(stored if provider == saved else group.table[provider].default)
         bind(group.status, "", "setText")
+        group.status.hide()
         self._sync_model_fields()
 
     def _sync_model_fields(self):
@@ -761,6 +772,7 @@ class Overlay:
 
     def _fetch_models(self, group):
         """「获取模型」：拿填的 key（没填就拿存的）去问接口，网络调用丢后台线程。"""
+        group.status.show()
         provider = self._provider_of(group)
         custom = group.kind == "draft" and provider in providers.CUSTOM
         base = self.baseEdit.text().strip() if custom else None
@@ -793,6 +805,7 @@ class Overlay:
 
     def _models_fetched(self, group, models, reason):
         """回到主线程：填进下拉框，原来选中的还在列表里就留着。"""
+        group.status.show()
         group.fetchButton.setEnabled(True)
         if not models:
             bind(group.status, reason or "获取失败，检查密钥、网络或 Base URL")
@@ -815,6 +828,7 @@ class Overlay:
         group.modelBox.clear()
         group.modelBox.setText(model)
         bind(group.status, "", "setText")
+        group.status.hide()
 
     def _load_language(self):
         lang = i18n.language()
@@ -931,7 +945,7 @@ class Overlay:
         self.debugSwitch.blockSignals(False)
 
     def _settings_feedback(self, text, error=False):
-        color = "#b44832" if error else _GREEN
+        color = "#b44832" if error else _ACCENT
         qss = f"BodyLabel {{ color: {color}; background: transparent; }}"
         setCustomStyleSheet(self.settingsFeedback, qss, qss)
         bind(self.settingsFeedback, text)
@@ -941,6 +955,7 @@ class Overlay:
         if self.pages.currentWidget() != self.settingsPage:
             self._load_settings()
         self.pages.setCurrentWidget(self.settingsPage)
+        self.settingsTab.setChecked(True)
         self.settingsButton.setEnabled(False)
         self.languageBox.setFocus()
         self.settingsPage.verticalScrollBar().setValue(0)
@@ -949,26 +964,38 @@ class Overlay:
         self.jev.keyEdit.clear()
         self.draft.keyEdit.clear()
         self.pages.setCurrentWidget(self.home)
+        self.homeTab.setChecked(True)
         self.settingsButton.setEnabled(True)
 
     def _fill(self, index):
         if self._busy or not self._current or index >= len(self.cands):
             return
+        self._check_analytics_exposure()
+        props = self._analytics_candidate(index)
+        attempt_id = str(uuid.uuid4())
+        started = time.monotonic()
+        analytics.track('fill_clicked', attempt_id=attempt_id, **props)
         try:
             self.on_fill(self.cands[index])
         except Exception as e:
+            analytics.track('fill_execution_finished', attempt_id=attempt_id, status='failure',
+                            duration_ms=round((time.monotonic()-started)*1000), **props)
             # 状态栏保持友好文案；真实原因和压缩堆栈进聊天记录，认得出是哪一步炸的
             import traceback
             self.set_status("未能填入，请确认聊天窗口可用后重试，或复制回复。", "error")
             self.log(f"[填入失败] {type(e).__name__}: {e}")
             self.log(f"[填入失败堆栈] {' '.join(traceback.format_exc().split())[:300]}")
             return
+        analytics.track('fill_execution_finished', attempt_id=attempt_id, status='executed_unverified',
+                        duration_ms=round((time.monotonic()-started)*1000), **props)
         self.set_status("已尝试填入，请确认内容后发送。", "success")
 
     def _copy(self, index):
         if self._busy or not self._current or index >= len(self.cands):
             return
         self.app.clipboard().setText(self.cands[index])
+        self._check_analytics_exposure()
+        analytics.track('reply_copied', **self._analytics_candidate(index))
         self.set_status("回复已复制，可粘贴并修改。", "success")
 
     def _capture_toggled(self, on):
@@ -1035,6 +1062,7 @@ class Overlay:
         self.setupButton.setVisible(not configured)
 
     def invalidate_replies(self):
+        self._analytics_leave('invalidated')
         self._current = False
         if self.cands:
             bind(self.updated, "上次建议", "setText")
@@ -1042,7 +1070,7 @@ class Overlay:
             card.set_available(False)
 
     def set_status(self, text, kind="idle"):
-        colors = {"idle": _MUTED, "busy": _GREEN, "success": _GREEN,
+        colors = {"idle": _MUTED, "busy": _ACCENT, "success": _ACCENT,
                   "warning": "#93611d", "error": "#b44832"}
         markers = {"idle": "●", "busy": "●", "success": "✓", "warning": "!", "error": "!"}
         qss = f"BodyLabel {{ color: {colors.get(kind, _MUTED)}; background: transparent; }}"
@@ -1060,6 +1088,7 @@ class Overlay:
         actual = max(0, int(actual or 0))
         limit = max(0, int(limit or 0))
         bind(self.contextStats, lambda: f"本轮模型上下文：{actual} / {limit} 条", "setText")
+        self.contextStats.show()
 
     def _toggle_history(self):
         self.feed.setVisible(self.feed.isHidden())
@@ -1187,6 +1216,8 @@ class Overlay:
 
     def _switch_to(self, title):
         """换正在看的会话：记录、对方最近说、条数、上次的建议一起换过去。"""
+        self._analytics_leave('conversation_switch')
+        self._analytics_result = None
         self._shown = title
         self._feed_entries = list(self.feeds.get(title, []))
         self._refresh_history_text()
@@ -1258,6 +1289,9 @@ class Overlay:
 
     def show(self, result):
         """按推荐顺序展示，按钮始终绑定 candidates 的原始索引。"""
+        if self._analytics_result and self._analytics_result.get('_analytics_id') != result.get('_analytics_id'):
+            self._analytics_leave('replaced')
+        self._analytics_result = result
         self.cands = result["candidates"]
         self.set_busy(False)
         self._current = bool(self.cands)
@@ -1271,6 +1305,7 @@ class Overlay:
             scores = [None] * len(self.cands)
         # 按概率降序排，推荐位（API 给的 choice）强制第一，同分按原索引
         order = sorted(range(len(self.cands)), key=lambda i: (i != best, -(scores[i] or 0), i))
+        self._analytics_order = order
         for position, index in enumerate(order):
             card = _ReplyCard(self, index, recommended=index == best, number=position, score=scores[index])
             self.replyBox.addWidget(card)
@@ -1299,6 +1334,33 @@ class Overlay:
             self.set_status("建议已更新，选一句适合你的回复", "success")
         else:
             self.set_status("未生成可用回复，请等待下一条新消息。", "error")
+
+    def _analytics_candidate(self, index):
+        result = self._analytics_result or {}
+        return dict(suggestion_id=result.get('_analytics_id', ''), candidate_index=index,
+                    position=self._analytics_order.index(index) + 1 if index in self._analytics_order else 0,
+                    recommended=index == result.get('best_index', 0))
+
+    def _check_analytics_exposure(self):
+        result = self._analytics_result or {}
+        sid = result.get('_analytics_id')
+        if not analytics._client or not analytics._client.config['enabled'] or not sid:
+            return
+        if (sid in self._analytics_exposed or not self._current or self._busy
+                or self._shown != self._chat or self.win.isMinimized()
+                or not self.win.isVisible() or self.pages.currentWidget() != self.home):
+            return
+        if not any(card.isVisible() and not card.visibleRegion().isEmpty() for card in self.cards):
+            return
+        self._analytics_exposed.add(sid)
+        self._analytics_first_seen[sid] = time.monotonic()
+        analytics.track('suggestion_exposed', suggestion_id=sid, candidate_count=len(self.cands),
+                        duration_ms=round((time.monotonic()-result.get('_analytics_started', time.monotonic()))*1000))
+
+    def _analytics_leave(self, reason):
+        sid = (self._analytics_result or {}).get('_analytics_id')
+        if sid and sid in self._analytics_exposed:
+            analytics.track('suggestion_left', suggestion_id=sid, reason=reason)
 
     def _clear_cards(self):
         for card in self.cards:

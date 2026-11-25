@@ -205,8 +205,8 @@ def retrieve(query: str, dimension: str | None = None, contact: str | None = Non
             memory_vec = np.frombuffer(stored_embedding, dtype=np.float32)
             similarity = float(np.dot(qvec, memory_vec))
         score = similarity * 100 + overlap + int(importance) * 0.01
-        # Require an actual lexical signal; importance alone must not surface unrelated facts.
-        if (qvec is not None and similarity >= 0.35) or (qvec is None and overlap >= 1):
+        # Only verified semantic scores may trigger the relevance model.
+        if qvec is not None and stored_embedding and similarity >= 0.425:
             ranked.append((score, dim, category, person, content, mid))
     ranked.sort(reverse=True)
     candidates = [{'id': mid, 'dimension': dim, 'category': category,
@@ -215,7 +215,7 @@ def retrieve(query: str, dimension: str | None = None, contact: str | None = Non
     from core.retrieval_filter import filter_candidates
     decision = filter_candidates(query, candidates, query_speaker=query_speaker)
     if trace is not None:
-        trace.update(embedding_mode='vector' if qvec is not None else 'lexical_fallback',
+        trace.update(embedding_mode='vector' if qvec is not None else 'unavailable',
                      candidates=candidates, verification=decision)
     keep = set(decision['keep_ids'])
     return "\n".join(
