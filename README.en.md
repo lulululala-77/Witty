@@ -14,7 +14,7 @@ An AI reply assistant for WeChat on Windows · Local memory retrieval · Three s
 ![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-Pilot-F97316?style=flat-square)
 
-**[Features](#features) · [How it works](#workflow) · [Getting started](#start) · [Privacy](#privacy) · [Acknowledgments](#credits)**
+**[Features](#features) · [How it works](#workflow) · [Tech stack](#tech-stack) · [Getting started](#start) · [Privacy](#privacy) · [Acknowledgments](#credits)**
 
 <sub>记得聊过什么，也帮你想好怎么回。</sub>
 
@@ -52,6 +52,21 @@ flowchart LR
 ```
 
 Local OCR and storage do not make the entire workflow offline. Generating replies calls your configured model provider. Relevant chat text and retrieved context may be included in those requests.
+
+<a id="tech-stack"></a>
+## 🛠️ Tech stack
+
+| Component | Technology | Purpose |
+| :--- | :--- | :--- |
+| Runtime | Python 3.11 / 3.12 · Windows 10 / 11 | Desktop application and background processing |
+| Desktop UI | PySide6 (Qt) · PySide6-Fluent-Widgets | Overlay, reply suggestions and settings |
+| Window capture | windows-capture · NumPy | Capture windows through Windows Graphics Capture and process images |
+| Local OCR | RapidOCR · ONNX Runtime · Windows.Media.Ocr (winsdk) | Extract chat text; Windows OCR adds Korean and Japanese recognition |
+| Local memory and retrieval | SQLite · Sentence Transformers · BAAI/bge-small-zh-v1.5 | Store memories, embed text and retrieve relevant context |
+| Embedding service | Python http.server · Local HTTP | Run the embedding model in a separate service for the desktop app |
+| Model integration | OpenAI SDK · Anthropic SDK · Google GenAI SDK · TypeSafe SDK | Connect to configured providers for analysis and reply generation |
+| Pilot analytics | PostHog | Optional usage analytics, disabled by default |
+| Windows packaging | PyInstaller | Build the desktop executable |
 
 <a id="start"></a>
 ## 🚀 Getting started

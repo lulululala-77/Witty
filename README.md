@@ -14,7 +14,7 @@ Windows 微信 AI 回复助手 · 本地记忆检索 · 三条候选 · 一键�
 ![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-内测中-F97316?style=flat-square)
 
-**[功能介绍](#features) · [工作流程](#workflow) · [开始使用](#start) · [隐私与统计](#privacy) · [项目来源](#credits)**
+**[功能介绍](#features) · [工作流程](#workflow) · [技术栈](#tech-stack) · [开始使用](#start) · [隐私与统计](#privacy) · [项目来源](#credits)**
 
 <sub>Remembers the context. Helps you find the words.</sub>
 
@@ -52,6 +52,21 @@ flowchart LR
 ```
 
 本地 OCR 和记忆存储不等于全程离线：生成回复时，需要调用你配置的模型服务。相关聊天文本和检索背景可能随请求发送给该服务商。
+
+<a id="tech-stack"></a>
+## 🛠️ 技术栈
+
+| 模块 | 技术 | 用途 |
+| :--- | :--- | :--- |
+| 运行环境 | Python 3.11 / 3.12 · Windows 10 / 11 | 桌面助手与后台处理逻辑 |
+| 桌面界面 | PySide6（Qt）· PySide6-Fluent-Widgets | 悬浮窗、候选回复与设置界面 |
+| 窗口截图 | windows-capture · NumPy | 通过 Windows Graphics Capture 捕获窗口并处理图像 |
+| 本地 OCR | RapidOCR · ONNX Runtime · Windows.Media.Ocr（winsdk） | 提取聊天文字；Windows OCR 补充韩语、日语识别 |
+| 本地记忆与检索 | SQLite · Sentence Transformers · BAAI/bge-small-zh-v1.5 | 存储聊天记忆、生成文本向量并检索相关上下文 |
+| 向量服务 | Python http.server · 本地 HTTP | 独立运行 embedding 模型，供主程序调用 |
+| 大模型接入 | OpenAI SDK · Anthropic SDK · Google GenAI SDK · TypeSafe SDK | 对接配置的模型服务，完成分析与回复生成 |
+| 内测统计 | PostHog | 可选的功能使用统计，默认关闭 |
+| Windows 打包 | PyInstaller | 构建桌面可执行程序 |
 
 <a id="start"></a>
 ## 🚀 开始使用
